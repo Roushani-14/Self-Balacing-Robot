@@ -1,1 +1,151 @@
+#include "I2Cdev.h"
+#include "PID_v1.h"
+#include "MPU6050_6Axis_MotionApps20.h"
+#include <Wire.h>
 
+// L298N motor driver pin connections 
+const int ENA = 5;   // your EN1
+const int IN1 = 11;  
+const int IN2 = 10;  
+const int ENB = 6;   // your EN2
+const int IN3 = 9;   
+const int IN4 = 8;   
+
+// MPU6050 interrupt pin connection
+const int INT = 2;
+
+// MPU6050 DMP Settings & Variables
+MPU6050 mpu;
+bool dmpReady = false;
+uint8_t mpuIntStatus;
+uint8_t devStatus;
+uint16_t packetSize;
+uint16_t fifoCount;
+uint8_t fifoBuffer[64];
+
+Quaternion q;
+VectorFloat gravity;
+float ypr[3];
+volatile bool mpuInterrupt = false;
+
+// PID Settings & Variables
+double input, output;
+double setpoint = 180;
+double Kp = 19,Ki = 24, Kd =0.7;
+PID pid(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
+
+double fallLimit = 15;
+
+// Interrupt Function
+void dmpDataReady() {
+    mpuInterrupt = true;
+}
+
+void setup() {
+    Serial.begin(115200);
+    Wire.begin();
+
+    // Motor pins
+    pinMode(IN1, OUTPUT);
+    pinMode(IN2, OUTPUT);
+    pinMode(IN3, OUTPUT);
+    pinMode(IN4, OUTPUT);
+
+    stopMotors();
+
+    // MPU setup
+    mpu.initialize();
+    devStatus = mpu.dmpInitialize();
+
+    // Calibrate MPU6050 (from your calibration)
+    mpu.setXGyroOffset(86);
+    mpu.setYGyroOffset(-11);
+    mpu.setZGyroOffset(13);
+    mpu.setZAccelOffset(4825);
+
+    if (devStatus == 0) {
+        mpu.setDMPEnabled(true);
+        attachInterrupt(digitalPinToInterrupt(INT), dmpDataReady, RISING);
+        mpuIntStatus = mpu.getIntStatus();
+        dmpReady = true;
+        packetSize = mpu.dmpGetFIFOPacketSize();
+    }
+
+    pid.SetMode(AUTOMATIC);
+    pid.SetSampleTime(10);
+    pid.SetOutputLimits(-255, 255);
+}
+
+void loop() {
+    if (!dmpReady) return;
+
+    while (!mpuInterrupt && fifoCount < packetSize) {}
+
+    mpuInterrupt = false;
+    mpuIntStatus = mpu.getIntStatus();
+    fifoCount = mpu.getFIFOCount();
+
+    if ((mpuIntStatus & 0x10) || fifoCount == 1024) {
+        mpu.resetFIFO();
+        return;
+    }
+    else if (mpuIntStatus & 0x02) {
+        while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
+
+        mpu.getFIFOBytes(fifoBuffer, packetSize);
+        fifoCount -= packetSize;
+
+        mpu.dmpGetQuaternion(&q, fifoBuffer);
+        mpu.dmpGetGravity(&gravity, &q);
+        mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+
+        input = ypr[1] * 180/M_PI + 180;
+       
+
+        if (abs(input - setpoint) < fallLimit) {
+            pid.Compute();
+            moveBot(output);
+             Serial.print("output: ");
+Serial.println(output);
+        }
+        else {
+            stopMotors();
+        }
+    }
+}
+
+
+
+void moveBot(double speed) {
+
+ 
+    if (speed > 0) {
+        analogWrite(ENA, speed);
+        digitalWrite(IN1, HIGH);
+        digitalWrite(IN2, LOW);
+
+        analogWrite(ENB, speed);
+        digitalWrite(IN3, HIGH);
+        digitalWrite(IN4, LOW);
+    }
+    else {
+        speed = -speed;
+        analogWrite(ENA, speed);
+        digitalWrite(IN1, LOW);
+        digitalWrite(IN2, HIGH);
+
+        analogWrite(ENB, speed);
+        digitalWrite(IN3, LOW);
+        digitalWrite(IN4, HIGH);
+    }
+}
+
+void stopMotors() {
+    analogWrite(ENA, 0);
+    analogWrite(ENB, 0);
+
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+}
